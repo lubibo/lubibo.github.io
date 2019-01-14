@@ -12,7 +12,7 @@ github_repo: "https://github.com/lubibo/lubibo.github.io.git" # you code reposit
 # Sidebar settings
 sidebar: true                           # whether or not using Sidebar.
 sidebar-about-description: "Goals determine what you going to be!"
-sidebar-avatar: /img/about-BY-gentle.jpg      # use absolute URL, seeing it's used in both `/` and `/about/`  设置头像
+sidebar-avatar: /img/头像.jpg      # use absolute URL, seeing it's used in both `/` and `/about/`  设置头像
 
 
 
