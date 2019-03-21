@@ -47,10 +47,121 @@ tags:								#标签
        - 缓存写入磁盘
        - 定期报告进度
 
-
   2. shuffle过程
      - map端的shuffle
+     ![jpg](/img/mapreduce/map端的shuffle.jpg)
+       - 在初始化的时候，每个map任务会被分配到一个缓冲区（默认100M）
+       - 当map任务执行过程中不断产生map的结果数据，这些数据最先写入缓冲区中，主要有两个原因：首先就是减少IO寻址的开销，其次就是为了对map之后的数据做进一步处理。
+       - 分区：将map的结果进行分区，分区数一般等于reduce的数量。默认HashPartitioner(key.hashCode() & Integer.MAX_VALUE)%numReduceTasks。根据分区算法生成的partition属性值，跟<k,v>一起序列化成数组写到缓冲区。
+       - 溢出比（默认0.8）：当缓冲区的数据量达到一定比例时就要将数据写入到临时文件当中。
+       - 在写入文件之前，还要进行排序操作（这里是快排），然后进行combine。（combine，就是原来是<k,<1,1>>,合并之后就是<k,2>）。
+       - 当所有的数据都map结束之后，产生了很多的临时文件，这时候就需要对这些文件的内容归并成一个大的文件（归并排序）。在归并的过程中,需要按照之前的partition属性值归并到一起，以便之后的reduce来将这个区的文件拉走。
      - reduce端的shuffle
+     ![jpg](/img/mapreduce/reduce端的shuffle.jpg)
+       - Reduce任务通过RPC向JobTracker询问Map任务是否已经完成，若完成，则领取数据Reduce领取数据先放入缓存，来自不同Map机器，先归并，再合并，写入磁盘
+       - 多个溢写文件归并成一个或多个大文件，文件中的键值对是排序的
+       - 当数据很少时，不需要溢写到磁盘，直接在缓存中归并，然后输出给Reduce。
   3. reduce过程
+     - 分配Reduce任务
+     - 创建TaskRunner运行Reduce任务
+     - 在单独的JVM中启动ReduceTask执行reduce函数
+     - 从Map节点下载中间结果数据
+     - 输出结果临时文件
+     - 定期报告进度
+
 ### 4. 编程案例
+  1. wordCount
+  ```java
+  public static class WordCountMap extends Mapper<LongWritable, Text, Text, IntWritable> {
+		private final IntWritable one = new IntWritable(1);
+		private Text word = new Text();
+
+		public void map(LongWritable key, Text value, Context context) throws IOException, InterruptedException {
+			String line = value.toString();
+			System.out.println("key:"+key.toString()+"  value:"+value.toString()+"   context:"+context.toString());
+			StringTokenizer token = new StringTokenizer(line);
+			while (token.hasMoreTokens()) {
+				word.set(token.nextToken());
+				context.write(word, one);
+			}
+		}
+	}
+
+	public static class WordCountReduce extends Reducer<Text, IntWritable, Text, IntWritable> {
+		public void reduce(Text key, Iterable<IntWritable> values, Context context)
+				throws IOException, InterruptedException {
+			int sum = 0;
+			System.out.print("key:"+key.toString()+"   values:");
+			for (IntWritable val : values) {
+				System.out.print(val.get()+",");
+				sum += val.get();
+			}
+			System.out.println();
+			context.write(key, new IntWritable(sum));
+		}
+	}
+
+	public static void main(String[] args) throws Exception {
+		System.setProperty("hadoop.home.dir", "E:\\developing_tools\\hadoop-2.7.7");
+		Configuration conf = new Configuration();
+		@SuppressWarnings("deprecation")
+		Job job = new Job(conf);
+		job.setJarByClass(WordCount.class);
+		job.setJobName("wordcount");
+		job.setOutputKeyClass(Text.class);
+		job.setOutputValueClass(IntWritable.class);
+		job.setMapperClass(WordCountMap.class);
+		job.setReducerClass(WordCountReduce.class);
+		job.setInputFormatClass(TextInputFormat.class);
+		job.setOutputFormatClass(TextOutputFormat.class);
+		FileInputFormat.addInputPath(job, new Path("hdfs://172.17.11.198:9000/input"));
+		FileOutputFormat.setOutputPath(job, new Path("hdfs://172.17.11.198:9000/output"));
+		job.waitForCompletion(true);
+	}
+  ```
+  2. 将默认的降序改成升序。
+  ```java
+    public static class MyMapper extends Mapper<Object, Text, IntWritable, IntWritable> {
+		public void map(Object key, Text value, Context context) throws IOException, InterruptedException {
+			IntWritable data = new IntWritable(Integer.parseInt(value.toString()));
+			System.out.println("value:"+value.toString());
+			IntWritable random = new IntWritable(new Random().nextInt());
+			context.write(data, random);
+		}
+	}
+
+	public static class MyReducer extends Reducer<IntWritable, IntWritable, IntWritable, IntWritable> {
+		public void reduce(IntWritable key, Iterable<IntWritable> values, Context context)
+				throws IOException, InterruptedException {
+			while (values.iterator().hasNext()) {
+				context.write(key, null);
+				values.iterator().next();
+			}
+		}
+	}
+
+
+	public static class IntWritableDecreasingComparator extends IntWritable.Comparator {
+		public int compare(byte[] b1, int s1, int l1, byte[] b2, int s2, int l2) {
+			return -super.compare(b1, s1, l1, b2, s2, l2);//将默认的降序改成升序
+		}
+	}
+
+	public static void main(String[] args) throws Exception {
+		System.setProperty("hadoop.home.dir", "E:\\developing_tools\\hadoop-2.7.7");
+		Configuration conf = new Configuration();
+		Job job = new Job(conf, "");
+		job.setMapperClass(MyMapper.class);//设置map类
+		job.setReducerClass(MyReducer.class);//设置reduce类
+		
+		job.setOutputKeyClass(IntWritable.class);//设置输出键类型
+		job.setOutputValueClass(IntWritable.class);//设置输出value类型
+
+		FileInputFormat.addInputPath(job, new Path("hdfs://172.17.11.198:9000/inputnum"));
+		FileOutputFormat.setOutputPath(job, new Path("hdfs://172.17.11.198:9000/outputnum"));
+		
+		job.setSortComparatorClass(IntWritableDecreasingComparator.class);// 设置比较器
+		System.exit(job.waitForCompletion(true) ? 0 : 1);
+	}
+  ```
 
